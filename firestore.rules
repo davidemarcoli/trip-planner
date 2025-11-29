@@ -1,0 +1,89 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    // Check if user is owner of the trip document (passed as data)
+    function isTripOwner(tripData) {
+      return isSignedIn() && tripData.ownerId == request.auth.uid;
+    }
+    
+    // Check if user is owner of the parent trip (fetches trip doc)
+    function isParentTripOwner(tripId) {
+      return isSignedIn() && get(/databases/$(database)/documents/trips/$(tripId)).data.ownerId == request.auth.uid;
+    }
+    
+    // Check permissions using parent trip ownership or permissions subcollection
+    function hasPermission(tripId, requiredRole) {
+      return isSignedIn() && (
+        isParentTripOwner(tripId) ||
+        (
+          exists(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)).data.role == requiredRole
+        )
+      );
+    }
+    
+    function canView(tripId) {
+      return hasPermission(tripId, 'view') || hasPermission(tripId, 'edit');
+    }
+    
+    function canEdit(tripId) {
+      return isParentTripOwner(tripId) || hasPermission(tripId, 'edit');
+    }
+    
+    // Users
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == userId;
+    }
+    
+    // Trips
+    match /trips/{tripId} {
+      // For list/get queries on trips collection, we check the document itself (resource.data)
+      allow read: if isSignedIn() && (isTripOwner(resource.data) || 
+                     (exists(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)) &&
+                      (get(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)).data.role == 'view' ||
+                       get(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)).data.role == 'edit'))) || 
+                     resource.data.isPublic == true;
+                     
+      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
+      
+      // For update/delete, we can use resource.data
+      allow update: if isSignedIn() && (isTripOwner(resource.data) || 
+                       (exists(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)) &&
+                        get(/databases/$(database)/documents/trips/$(tripId)/permissions/$(request.auth.uid)).data.role == 'edit'));
+                        
+      allow delete: if isSignedIn() && isTripOwner(resource.data);
+      
+      // Permissions
+      match /permissions/{userId} {
+        allow read: if isSignedIn() && (isParentTripOwner(tripId) || canView(tripId));
+        allow write: if isParentTripOwner(tripId);
+      }
+      
+      // Days and Items
+      match /days/{dayId} {
+        allow read: if isSignedIn() && canView(tripId) || 
+                       get(/databases/$(database)/documents/trips/$(tripId)).data.isPublic == true;
+        allow write: if canEdit(tripId);
+        
+        match /items/{itemId} {
+          allow read: if isSignedIn() && canView(tripId) || 
+                         get(/databases/$(database)/documents/trips/$(tripId)).data.isPublic == true;
+          allow write: if canEdit(tripId);
+        }
+      }
+    }
+
+    // Collection Group Query for items
+    match /{path=**}/items/{itemId} {
+      allow read: if (isSignedIn() && isParentTripOwner(resource.data.tripId)) || 
+                     get(/databases/$(database)/documents/trips/$(resource.data.tripId)).data.isPublic == true;
+    }
+  }
+}
